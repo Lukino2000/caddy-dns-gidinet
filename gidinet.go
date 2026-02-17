@@ -72,14 +72,14 @@ func (p *Provider) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-func (p *Provider) GetDNSProvider() (libdns.Provider, error) {
-	return &libgidinet.Provider{
-		Username:     p.Username,
-		Password:     p.Password,
-		CoreEndpoint: p.CoreEndpoint,
-		DNSEndpoint:  p.DNSEndpoint,
-	}, nil
-}
+// func (p *Provider) GetDNSProvider() (libdns.Provider, error) {
+// 	return &libgidinet.Provider{
+// 		Username:     p.Username,
+// 		Password:     p.Password,
+// 		CoreEndpoint: p.CoreEndpoint,
+// 		DNSEndpoint:  p.DNSEndpoint,
+// 	}, nil
+// }
 
 var _ caddydns.Provider = (*Provider)(nil)
 var _ caddy.Provisioner = (*Provider)(nil)
