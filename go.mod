@@ -1,11 +1,11 @@
 module github.com/Lukino2000/caddy-dns-gidinet
 
-go 1.25.4
+go 1.25
 
 require (
-	github.com/Lukino2000/libdns-gidinet v0.0.1
+	github.com/Lukino2000/libdns-gidinet v0.0.2
 	github.com/caddyserver/caddy/v2 v2.10.2
-	github.com/libdns/libdns v1.1.0
+	github.com/libdns/libdns v1.1.1
 )
 
 require (
@@ -124,5 +124,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	howett.net/plist v1.0.0 // indirect
 )
-
-replace github.com/libdns/libdns => github.com/libdns/libdns v0.2.1
