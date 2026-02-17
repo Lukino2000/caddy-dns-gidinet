@@ -5,7 +5,8 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
-	"github.com/caddyserver/caddy/v2/modules/caddytls"
+	"github.com/caddyserver/caddy/v2/modules/caddydns"
+	"github.com/libdns/libdns"
 
 	libgidinet "github.com/Lukino2000/libdns-gidinet"
 )
@@ -34,15 +35,6 @@ func (p *Provider) Provision(ctx caddy.Context) error {
 	}
 
 	return nil
-}
-
-func (p Provider) GetDNSProvider() (caddytls.DNSProvider, error) {
-	return &libgidinet.Provider{
-		Username:     p.Username,
-		Password:     p.Password,
-		CoreEndpoint: p.CoreEndpoint,
-		DNSEndpoint:  p.DNSEndpoint,
-	}, nil
 }
 
 func (p *Provider) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -82,5 +74,15 @@ func (p *Provider) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
+func (p *Provider) GetDNSProvider() (libdns.Provider, error) {
+	return &libgidinet.Provider{
+		Username:     p.Username,
+		Password:     p.Password,
+		CoreEndpoint: p.CoreEndpoint,
+		DNSEndpoint:  p.DNSEndpoint,
+	}, nil
+}
+
+var _ caddydns.Provider = (*Provider)(nil)
 var _ caddy.Provisioner = (*Provider)(nil)
 var _ caddyfile.Unmarshaler = (*Provider)(nil)
