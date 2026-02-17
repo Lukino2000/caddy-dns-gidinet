@@ -1,0 +1,10 @@
+# Binaries
+example/example
+*.exe
+
+# Environment files with secrets
+example/.env
+.env
+
+# Go
+vendor/

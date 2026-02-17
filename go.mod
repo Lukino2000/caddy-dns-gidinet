@@ -1,14 +1,10 @@
 module github.com/Lukino2000/caddy-dns-gidinet
 
-go 1.25
-
-require (
-	github.com/Lukino2000/libdns-gidinet v0.0.2
-	github.com/caddyserver/caddy/v2 v2.10.2
-)
+go 1.23
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/caddyserver/caddy/v2 v2.10.2 // indirect
 	github.com/caddyserver/certmagic v0.24.0 // indirect
 	github.com/caddyserver/zerossl v0.1.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

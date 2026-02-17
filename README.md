@@ -1,61 +1,71 @@
-# caddy-dns-gidinet
+# Gidinet DNS provider for Caddy 2
 
-Provider DNS per Caddy (ACME DNS-01) basato su GiDiNet.
-
-Questo modulo usa il provider libdns:  
-**github.com/Lukino2000/libdns-gidinet**
+This package implements the [libdns](https://github.com/libdns/libdns) interfaces for the [Gidinet](https://www.gidinet.com/) DNS API (SOAP), allowing you to manage DNS records via Caddy's automatic HTTPS (ACME DNS-01 challenge).
 
 ---
+## Caddy module name
 
-## Installazione
+dns.providers.gidinet
 
-Compila Caddy con `xcaddy` includendo il modulo:
+
+---
+## Configuration
+
+### Caddyfile
+
+```caddyfile
+tls {
+    dns gidinet {
+        username {env.GIDINET_USERNAME}
+        password {env.GIDINET_PASSWORD}
+    }
+}
+```
+
+### JSON
+
+```json
+{
+    "module": "dns.providers.gidinet",
+    "username": "your_username",
+    "password": "your_password"
+}
+```
+
+---
+## Building Caddy with this module
 
 ```bash
-go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-
 xcaddy build --with github.com/Lukino2000/caddy-dns-gidinet
 ```
 
-# Configurazione Caddyfile
+---
+## Testing
 
-## Esempio base
-
-```caddyfile
-example.com {
-	tls {
-		dns gidinet {
-			username gdn5377
-			password tua_password
-		}
-	}
-	respond "ok"
-}
+```bash
+cd example
+cp .env.example .env
+# Edit .env with your real credentials
+go run .
 ```
 
-## Esempio con variabili ambiente
+---
+## Comandi finali per compilare e testare
 
-```caddyfile
-example.com {
-	tls {
-		dns gidinet {
-			username {$GIDINET_USERNAME}
-			password {$GIDINET_PASSWORD}
-		}
-	}
-	respond "ok"
-}
+```bash
+cd caddy-dns-gidinet
+
+# Modulo principale
+go mod tidy
+go build ./...
+
+# Modulo example
+cd example
+go mod tidy
+go build .
+
+# Per eseguire il test
+cp .env.example .env
+# Modifica .env con le tue credenziali
+go run .
 ```
-
-## Note
-La password viene inviata come Base64 (gestita dal provider).
-Hostname relativo: per record TXT ACME viene usato _acme-challenge.
-
-## Endpoint di default:
-Core: https://api.quickservicebox.com/API/Beta/CoreAPI.asmx
-DNS:  https://api.quickservicebox.com/API/Beta/DNSAPI.asmx
-
-Se servono endpoint diversi, verranno supportati nei prossimi rilasci.
-
-## Licenza
-MIT
