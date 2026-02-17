@@ -43,7 +43,8 @@ func main() {
 		log.Fatalf("GetRecords failed: %v", err)
 	}
 	for _, r := range records {
-		fmt.Printf("  [%s] %s -> %s (TTL: %s, ID: %s)\n", r.Type, r.Name, r.Value, r.TTL, r.ID)
+		rr := r.RR()
+		fmt.Printf("  [%s] %s -> %s (TTL: %s)\n", rr.Type, rr.Name, rr.Data, rr.TTL)
 	}
 	fmt.Printf("Total: %d records\n\n", len(records))
 
@@ -54,18 +55,18 @@ func main() {
 	fmt.Println("=== AppendRecords ===")
 	fmt.Printf("Adding TXT record: %s -> %s\n", testName, testValue)
 	added, err := provider.AppendRecords(ctx, zone, []libdns.Record{
-		{
-			Type:  "TXT",
-			Name:  testName,
-			Value: testValue,
-			TTL:   120 * time.Second, // Will be normalized down to 60s
+		libdns.TXT{
+			Name: testName,
+			TTL:  120 * time.Second, // Will be normalized down to 60s
+			Text: testValue,
 		},
 	})
 	if err != nil {
 		log.Fatalf("AppendRecords failed: %v", err)
 	}
 	for _, r := range added {
-		fmt.Printf("  Added: [%s] %s -> %s (TTL: %s, ID: %s)\n", r.Type, r.Name, r.Value, r.TTL, r.ID)
+		rr := r.RR()
+		fmt.Printf("  Added: [%s] %s -> %s (TTL: %s)\n", rr.Type, rr.Name, rr.Data, rr.TTL)
 	}
 	fmt.Println()
 
@@ -76,59 +77,70 @@ func main() {
 		log.Fatalf("GetRecords failed: %v", err)
 	}
 	for _, r := range records {
-		fmt.Printf("  [%s] %s -> %s (TTL: %s, ID: %s)\n", r.Type, r.Name, r.Value, r.TTL, r.ID)
+		rr := r.RR()
+		fmt.Printf("  [%s] %s -> %s (TTL: %s)\n", rr.Type, rr.Name, rr.Data, rr.TTL)
 	}
 	fmt.Printf("Total: %d records\n\n", len(records))
 
 	// --- Step 4: Update the TXT record via SetRecords ---
-	if len(added) > 0 {
-		updatedValue := testValue + "-updated"
-		fmt.Println("=== SetRecords (update) ===")
-		fmt.Printf("Updating TXT record: %s -> %s\n", testName, updatedValue)
-		setResult, err := provider.SetRecords(ctx, zone, []libdns.Record{
-			{
-				ID:    added[0].ID,
-				Type:  "TXT",
-				Name:  testName,
-				Value: updatedValue,
-				TTL:   300 * time.Second,
-			},
-		})
-		if err != nil {
-			log.Fatalf("SetRecords failed: %v", err)
-		}
-		for _, r := range setResult {
-			fmt.Printf("  Set: [%s] %s -> %s (TTL: %s, ID: %s)\n", r.Type, r.Name, r.Value, r.TTL, r.ID)
-		}
-		fmt.Println()
-
-		// --- Step 5: Delete the TXT record ---
-		fmt.Println("=== DeleteRecords ===")
-		fmt.Printf("Deleting TXT record: %s\n", testName)
-		deletedRecs, err := provider.DeleteRecords(ctx, zone, []libdns.Record{
-			{
-				ID:   setResult[0].ID,
-				Type: "TXT",
-				Name: testName,
-			},
-		})
-		if err != nil {
-			log.Fatalf("DeleteRecords failed: %v", err)
-		}
-		for _, r := range deletedRecs {
-			fmt.Printf("  Deleted: [%s] %s -> %s\n", r.Type, r.Name, r.Value)
-		}
-		fmt.Println()
+	updatedValue := testValue + "-updated"
+	fmt.Println("=== SetRecords (update) ===")
+	fmt.Printf("Updating TXT record: %s -> %s\n", testName, updatedValue)
+	setResult, err := provider.SetRecords(ctx, zone, []libdns.Record{
+		libdns.TXT{
+			Name: testName,
+			TTL:  300 * time.Second,
+			Text: updatedValue,
+		},
+	})
+	if err != nil {
+		log.Fatalf("SetRecords failed: %v", err)
 	}
+	for _, r := range setResult {
+		rr := r.RR()
+		fmt.Printf("  Set: [%s] %s -> %s (TTL: %s)\n", rr.Type, rr.Name, rr.Data, rr.TTL)
+	}
+	fmt.Println()
 
-	// --- Step 6: Final listing ---
+	// --- Step 5: List records again to confirm update ---
+	fmt.Println("=== GetRecords (after update) ===")
+	records, err = provider.GetRecords(ctx, zone)
+	if err != nil {
+		log.Fatalf("GetRecords failed: %v", err)
+	}
+	for _, r := range records {
+		rr := r.RR()
+		fmt.Printf("  [%s] %s -> %s (TTL: %s)\n", rr.Type, rr.Name, rr.Data, rr.TTL)
+	}
+	fmt.Printf("Total: %d records\n\n", len(records))
+
+	// --- Step 6: Delete the TXT record ---
+	fmt.Println("=== DeleteRecords ===")
+	fmt.Printf("Deleting TXT record: %s\n", testName)
+	deletedRecs, err := provider.DeleteRecords(ctx, zone, []libdns.Record{
+		libdns.TXT{
+			Name: testName,
+			Text: updatedValue,
+		},
+	})
+	if err != nil {
+		log.Fatalf("DeleteRecords failed: %v", err)
+	}
+	for _, r := range deletedRecs {
+		rr := r.RR()
+		fmt.Printf("  Deleted: [%s] %s -> %s\n", rr.Type, rr.Name, rr.Data)
+	}
+	fmt.Println()
+
+	// --- Step 7: Final listing ---
 	fmt.Println("=== GetRecords (final) ===")
 	records, err = provider.GetRecords(ctx, zone)
 	if err != nil {
 		log.Fatalf("GetRecords failed: %v", err)
 	}
 	for _, r := range records {
-		fmt.Printf("  [%s] %s -> %s (TTL: %s, ID: %s)\n", r.Type, r.Name, r.Value, r.TTL, r.ID)
+		rr := r.RR()
+		fmt.Printf("  [%s] %s -> %s (TTL: %s)\n", rr.Type, rr.Name, rr.Data, rr.TTL)
 	}
 	fmt.Printf("Total: %d records\n", len(records))
 
