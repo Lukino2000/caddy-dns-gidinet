@@ -1,9 +1,11 @@
 package gidinet
 
 import (
+	"fmt"
+
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddytls"
-	"github.com/libdns/libdns"
 
 	libgidinet "github.com/Lukino2000/libdns-gidinet"
 )
@@ -27,21 +29,52 @@ func (Provider) CaddyModule() caddy.ModuleInfo {
 }
 
 func (p *Provider) Provision(ctx caddy.Context) error {
+	if p.Username == "" || p.Password == "" {
+		return fmt.Errorf("gidinet: username e password sono obbligatori")
+	}
+
 	return nil
 }
 
-func (p Provider) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+func (p Provider) GetDNSProvider() (caddytls.DNSProvider, error) {
+	return &libgidinet.Provider{
+		Username:     p.Username,
+		Password:     p.Password,
+		CoreEndpoint: p.CoreEndpoint,
+		DNSEndpoint:  p.DNSEndpoint,
+	}, nil
+}
+
+func (p *Provider) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
 		for d.NextBlock(0) {
 			switch d.Val() {
 			case "username":
-				p.Username = d.RemainingArgs()[0]
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return d.ArgErr()
+				}
+				p.Username = args[0]
 			case "password":
-				p.Password = d.RemainingArgs()[0]
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return d.ArgErr()
+				}
+				p.Password = args[0]
 			case "core_endpoint":
-				p.CoreEndpoint = d.RemainingArgs()[0]
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return d.ArgErr()
+				}
+				p.CoreEndpoint = args[0]
 			case "dns_endpoint":
-				p.DNSEndpoint = d.RemainingArgs()[0]
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return d.ArgErr()
+				}
+				p.DNSEndpoint = args[0]
+			default:
+				return d.Errf("parametro non riconosciuto: %s", d.Val())
 			}
 		}
 	}
@@ -49,15 +82,5 @@ func (p Provider) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-func (p Provider) GetDNSProvider() (caddytls.DNSProvider, error) {
-	return caddytls.DNSProvider(libgidinet.Provider{
-		Username:     p.Username,
-		Password:     p.Password,
-		CoreEndpoint: p.CoreEndpoint,
-		DNSEndpoint:  p.DNSEndpoint,
-	}), nil
-}
-
-var _ caddytls.DNSProvider = (*libgidinet.Provider)(nil)
 var _ caddy.Provisioner = (*Provider)(nil)
 var _ caddyfile.Unmarshaler = (*Provider)(nil)
