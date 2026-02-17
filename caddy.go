@@ -26,7 +26,7 @@ func (p *Provider) Provision(ctx caddy.Context) error {
 	p.Log = func(msg string, args ...interface{}) {
 		logger.Sugar().Infof(msg, args...)
 	}
-	p.log("Gidinet DNS provider provisioned for user %q", p.Username)
+	p.log("Gidinet DNS provider provisioned for user %q (password length: %d)", p.Username, len(p.Password))
 	return nil
 }
 
