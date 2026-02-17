@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +62,7 @@ func (p *Provider) log(msg string, args ...interface{}) {
 
 // normalizeTTL rounds the given duration down to the nearest allowed TTL value.
 // If the duration is smaller than the smallest allowed TTL, an error is returned.
+// A zero or negative duration defaults to the smallest allowed TTL.
 func normalizeTTL(d time.Duration) (uint, error) {
 	seconds := int(d.Seconds())
 	if seconds <= 0 {
@@ -124,52 +127,201 @@ func fqdnToRelative(hostname, domain string) string {
 }
 
 // toLibdnsRecord converts a Gidinet DNS record list item to a libdns.Record.
+// It returns the appropriate concrete type (Address, TXT, CNAME, MX, NS, SRV, CAA)
+// based on the record type. For unknown types, it returns an RR.
 func toLibdnsRecord(item dnsRecordListItem, domain string) libdns.Record {
-	return libdns.Record{
-		ID:    buildRecordID(item),
-		Type:  item.RecordType,
-		Name:  fqdnToRelative(item.HostName, domain),
-		Value: item.Data,
-		TTL:   time.Duration(item.TTL) * time.Second,
+	name := fqdnToRelative(item.HostName, domain)
+	ttl := time.Duration(item.TTL) * time.Second
+
+	switch strings.ToUpper(item.RecordType) {
+	case "A", "AAAA":
+		addr, err := netip.ParseAddr(item.Data)
+		if err != nil {
+			// Fall back to RR if the IP cannot be parsed
+			return libdns.RR{
+				Name: name,
+				TTL:  ttl,
+				Type: item.RecordType,
+				Data: item.Data,
+			}
+		}
+		return libdns.Address{
+			Name: name,
+			TTL:  ttl,
+			IP:   addr,
+		}
+
+	case "TXT":
+		// Strip surrounding quotes if present (Gidinet may return quoted TXT values)
+		text := item.Data
+		if len(text) >= 2 && text[0] == '"' && text[len(text)-1] == '"' {
+			text = text[1 : len(text)-1]
+		}
+		return libdns.TXT{
+			Name: name,
+			TTL:  ttl,
+			Text: text,
+		}
+
+	case "CNAME":
+		return libdns.CNAME{
+			Name:   name,
+			TTL:    ttl,
+			Target: item.Data,
+		}
+
+	case "MX":
+		return libdns.MX{
+			Name:       name,
+			TTL:        ttl,
+			Preference: uint16(item.Priority),
+			Target:     item.Data,
+		}
+
+	case "NS":
+		return libdns.NS{
+			Name:   name,
+			TTL:    ttl,
+			Target: item.Data,
+		}
+
+	case "SRV":
+		return parseSRVRecord(name, ttl, item)
+
+	case "CAA":
+		return parseCAARecord(name, ttl, item)
+
+	default:
+		return libdns.RR{
+			Name: name,
+			TTL:  ttl,
+			Type: item.RecordType,
+			Data: item.Data,
+		}
 	}
 }
 
-// buildRecordID creates a synthetic ID from the record fields since Gidinet does not provide record IDs.
-// The ID is composed of: HostName|RecordType|Data
-func buildRecordID(item dnsRecordListItem) string {
-	return item.HostName + "|" + item.RecordType + "|" + item.Data
-}
+// parseSRVRecord parses a Gidinet SRV record into a libdns.SRV.
+// SRV Data format from Gidinet is expected to be: "priority weight port target"
+// but priority is also in the Priority field. The Name for SRV includes _service._proto prefix.
+func parseSRVRecord(name string, ttl time.Duration, item dnsRecordListItem) libdns.Record {
+	// SRV data: "weight port target" (priority is separate in Gidinet)
+	// or possibly "priority weight port target"
+	parts := strings.Fields(item.Data)
 
-// parseRecordID parses a synthetic record ID back into its components.
-// Returns hostname, recordType, data, ok.
-func parseRecordID(id string) (string, string, string, bool) {
-	parts := strings.SplitN(id, "|", 3)
-	if len(parts) != 3 {
-		return "", "", "", false
+	var weight, port uint16
+	var target string
+
+	if len(parts) >= 3 {
+		// Try parsing as "weight port target"
+		w, err1 := strconv.ParseUint(parts[0], 10, 16)
+		p, err2 := strconv.ParseUint(parts[1], 10, 16)
+		if err1 == nil && err2 == nil {
+			weight = uint16(w)
+			port = uint16(p)
+			target = parts[2]
+		}
 	}
-	return parts[0], parts[1], parts[2], true
+
+	// Extract service and transport from the name (e.g. "_sip._tcp.example" -> service="sip", transport="tcp")
+	var service, transport, srvName string
+	nameParts := strings.SplitN(name, ".", 3)
+	if len(nameParts) >= 3 && strings.HasPrefix(nameParts[0], "_") && strings.HasPrefix(nameParts[1], "_") {
+		service = strings.TrimPrefix(nameParts[0], "_")
+		transport = strings.TrimPrefix(nameParts[1], "_")
+		srvName = nameParts[2]
+	} else {
+		// Cannot parse service/transport, fall back to RR
+		return libdns.RR{
+			Name: name,
+			TTL:  ttl,
+			Type: "SRV",
+			Data: item.Data,
+		}
+	}
+
+	return libdns.SRV{
+		Service:   service,
+		Transport: transport,
+		Name:      srvName,
+		TTL:       ttl,
+		Priority:  uint16(item.Priority),
+		Weight:    weight,
+		Port:      port,
+		Target:    target,
+	}
 }
 
-// toDNSRecord converts a libdns.Record to a Gidinet dnsRecord for API calls.
-func (p *Provider) toDNSRecord(rec libdns.Record, domain string) (dnsRecord, error) {
-	ttl, err := normalizeTTL(rec.TTL)
+// parseCAARecord parses a Gidinet CAA record into a libdns.CAA.
+// CAA Data format from Gidinet: 'flags tag "value"'
+func parseCAARecord(name string, ttl time.Duration, item dnsRecordListItem) libdns.Record {
+	// Parse: flags tag "value"
+	data := strings.TrimSpace(item.Data)
+	parts := strings.SplitN(data, " ", 3)
+	if len(parts) < 3 {
+		// Cannot parse, fall back to RR
+		return libdns.RR{
+			Name: name,
+			TTL:  ttl,
+			Type: "CAA",
+			Data: item.Data,
+		}
+	}
+
+	flags, err := strconv.ParseUint(parts[0], 10, 8)
+	if err != nil {
+		return libdns.RR{
+			Name: name,
+			TTL:  ttl,
+			Type: "CAA",
+			Data: item.Data,
+		}
+	}
+
+	tag := parts[1]
+	value := parts[2]
+	// Strip surrounding quotes from value
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+	}
+
+	return libdns.CAA{
+		Name:  name,
+		TTL:   ttl,
+		Flags: uint8(flags),
+		Tag:   tag,
+		Value: value,
+	}
+}
+
+// recordToGidinet converts a libdns.Record to a Gidinet dnsRecord for API calls.
+func (p *Provider) recordToGidinet(rec libdns.Record, domain string) (dnsRecord, error) {
+	rr := rec.RR()
+
+	ttl, err := normalizeTTL(rr.TTL)
 	if err != nil {
 		return dnsRecord{}, err
 	}
 
 	var priority uint
-	if strings.EqualFold(rec.Type, "MX") {
-		// libdns does not have a Priority field; for MX records the priority
-		// is typically encoded as part of the Value (e.g. "10 mail.example.com").
-		// We default to 0 here; users needing custom priority should set it in the value.
-		priority = 0
+	data := rr.Data
+
+	// Handle specific types for priority and data formatting
+	switch r := rec.(type) {
+	case libdns.MX:
+		priority = uint(r.Preference)
+		data = r.Target
+	case libdns.TXT:
+		data = r.Text
+	default:
+		// For other types, use the RR data as-is
 	}
 
 	return dnsRecord{
 		DomainName: domain,
-		HostName:   relativeToFQDN(rec.Name, domain),
-		RecordType: rec.Type,
-		Data:       rec.Value,
+		HostName:   relativeToFQDN(rr.Name, domain),
+		RecordType: rr.Type,
+		Data:       data,
 		TTL:        ttl,
 		Priority:   priority,
 	}, nil
@@ -201,7 +353,8 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 	for _, item := range result.ResultItems {
 		rec := toLibdnsRecord(item, domain)
 		records = append(records, rec)
-		p.log("GetRecords: found record type=%s name=%q value=%q ttl=%s", rec.Type, rec.Name, rec.Value, rec.TTL)
+		rr := rec.RR()
+		p.log("GetRecords: found record type=%s name=%q data=%q ttl=%s", rr.Type, rr.Name, rr.Data, rr.TTL)
 	}
 
 	p.log("GetRecords: total %d records for domain %q", len(records), domain)
@@ -209,25 +362,25 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 }
 
 // AppendRecords adds the given DNS records to the zone. It returns the records that were added.
-func (p *Provider) AppendRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
+func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	domain := zoneToDomain(zone)
-	p.log("AppendRecords: zone=%q domain=%q count=%d", zone, domain, len(records))
+	p.log("AppendRecords: zone=%q domain=%q count=%d", zone, domain, len(recs))
 
 	client := p.getClient()
 	var added []libdns.Record
 
-	for _, rec := range records {
-		dnsRec, err := p.toDNSRecord(rec, domain)
+	for _, rec := range recs {
+		gidiRec, err := p.recordToGidinet(rec, domain)
 		if err != nil {
-			return added, fmt.Errorf("AppendRecords: failed to convert record %q: %w", rec.Name, err)
+			return added, fmt.Errorf("AppendRecords: failed to convert record: %w", err)
 		}
 
-		p.log("AppendRecords: adding type=%s hostname=%q data=%q ttl=%d", dnsRec.RecordType, dnsRec.HostName, dnsRec.Data, dnsRec.TTL)
+		p.log("AppendRecords: adding type=%s hostname=%q data=%q ttl=%d", gidiRec.RecordType, gidiRec.HostName, gidiRec.Data, gidiRec.TTL)
 
-		result, err := client.recordAdd(ctx, dnsRec)
+		result, err := client.recordAdd(ctx, gidiRec)
 		if err != nil {
 			return added, fmt.Errorf("AppendRecords: %w", err)
 		}
@@ -236,238 +389,202 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 			return added, fmt.Errorf("AppendRecords: %w", err)
 		}
 
-		// Build the returned record with a synthetic ID
-		addedRec := rec
-		addedRec.ID = dnsRec.HostName + "|" + dnsRec.RecordType + "|" + dnsRec.Data
-		addedRec.TTL = time.Duration(dnsRec.TTL) * time.Second
-		added = append(added, addedRec)
-
-		p.log("AppendRecords: successfully added record id=%q", addedRec.ID)
+		added = append(added, rec)
+		p.log("AppendRecords: successfully added record type=%s hostname=%q", gidiRec.RecordType, gidiRec.HostName)
 	}
 
 	return added, nil
 }
 
 // SetRecords sets the given DNS records in the zone, creating or updating as needed.
-// For records that have an ID (synthetic: HostName|Type|Data), it uses recordUpdate.
-// For records without an ID, it uses recordAdd.
-func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
+// For each (name, type) pair in the input, it ensures that only the provided records
+// exist in the zone for that pair, removing any extras.
+func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	domain := zoneToDomain(zone)
-	p.log("SetRecords: zone=%q domain=%q count=%d", zone, domain, len(records))
+	p.log("SetRecords: zone=%q domain=%q count=%d", zone, domain, len(recs))
 
 	client := p.getClient()
+
+	// Fetch existing records
+	listResult, err := client.recordGetList(ctx, domain)
+	if err != nil {
+		return nil, fmt.Errorf("SetRecords: failed to get existing records: %w", err)
+	}
+	if err := checkResult(&apiResult{
+		ResultText:    listResult.ResultText,
+		ResultCode:    listResult.ResultCode,
+		ResultSubCode: listResult.ResultSubCode,
+	}, "recordGetList"); err != nil {
+		return nil, fmt.Errorf("SetRecords: %w", err)
+	}
+
+	// Build a set of (name, type) pairs from the input
+	type nameType struct {
+		name     string
+		recType  string
+	}
+	inputPairs := make(map[nameType]bool)
+	for _, rec := range recs {
+		rr := rec.RR()
+		inputPairs[nameType{name: rr.Name, recType: rr.Type}] = true
+	}
+
+	// Delete existing records that match any (name, type) pair in the input
+	for _, existing := range listResult.ResultItems {
+		relName := fqdnToRelative(existing.HostName, domain)
+		nt := nameType{name: relName, recType: existing.RecordType}
+		if inputPairs[nt] {
+			if existing.ReadOnly {
+				p.log("SetRecords: skipping read-only record type=%s hostname=%q", existing.RecordType, existing.HostName)
+				continue
+			}
+
+			delRec := dnsRecord{
+				DomainName: domain,
+				HostName:   existing.HostName,
+				RecordType: existing.RecordType,
+				Data:       existing.Data,
+				TTL:        uint(existing.TTL),
+				Priority:   uint(existing.Priority),
+			}
+
+			p.log("SetRecords: deleting old record type=%s hostname=%q data=%q", delRec.RecordType, delRec.HostName, delRec.Data)
+
+			delResult, err := client.recordDelete(ctx, delRec)
+			if err != nil {
+				return nil, fmt.Errorf("SetRecords: failed to delete old record: %w", err)
+			}
+			if err := checkResult(delResult, "recordDelete"); err != nil {
+				return nil, fmt.Errorf("SetRecords: %w", err)
+			}
+		}
+	}
+
+	// Add the new records
 	var set []libdns.Record
-
-	for _, rec := range records {
-		newDNSRec, err := p.toDNSRecord(rec, domain)
+	for _, rec := range recs {
+		gidiRec, err := p.recordToGidinet(rec, domain)
 		if err != nil {
-			return set, fmt.Errorf("SetRecords: failed to convert record %q: %w", rec.Name, err)
+			return set, fmt.Errorf("SetRecords: failed to convert record: %w", err)
 		}
 
-		if rec.ID != "" {
-			// We have a synthetic ID — try to update
-			oldHostName, oldType, oldData, ok := parseRecordID(rec.ID)
-			if !ok {
-				return set, fmt.Errorf("SetRecords: invalid record ID %q", rec.ID)
-			}
+		p.log("SetRecords: adding record type=%s hostname=%q data=%q ttl=%d", gidiRec.RecordType, gidiRec.HostName, gidiRec.Data, gidiRec.TTL)
 
-			p.log("SetRecords: updating record old=[%s %s %s] new=[%s %s %s]",
-				oldHostName, oldType, oldData,
-				newDNSRec.HostName, newDNSRec.RecordType, newDNSRec.Data)
-
-			// To find the old TTL and Priority, we need to look up the existing record.
-			// We fetch the current records to get the old TTL/Priority.
-			listResult, err := client.recordGetList(ctx, domain)
-			if err != nil {
-				return set, fmt.Errorf("SetRecords: failed to get existing records: %w", err)
-			}
-			if err := checkResult(&apiResult{
-				ResultText:    listResult.ResultText,
-				ResultCode:    listResult.ResultCode,
-				ResultSubCode: listResult.ResultSubCode,
-			}, "recordGetList"); err != nil {
-				return set, fmt.Errorf("SetRecords: %w", err)
-			}
-
-			var oldTTL uint
-			var oldPriority uint
-			found := false
-			for _, item := range listResult.ResultItems {
-				if item.HostName == oldHostName && item.RecordType == oldType && item.Data == oldData {
-					oldTTL = uint(item.TTL)
-					oldPriority = uint(item.Priority)
-					found = true
-					break
-				}
-			}
-
-			if !found {
-				// Old record not found — fall back to add
-				p.log("SetRecords: old record not found, falling back to add")
-				result, err := client.recordAdd(ctx, newDNSRec)
-				if err != nil {
-					return set, fmt.Errorf("SetRecords: recordAdd fallback failed: %w", err)
-				}
-				if err := checkResult(result, "recordAdd"); err != nil {
-					return set, fmt.Errorf("SetRecords: recordAdd fallback: %w", err)
-				}
-			} else {
-				oldRec := dnsOldRecord{
-					DomainName: domain,
-					HostName:   oldHostName,
-					RecordType: oldType,
-					Data:       oldData,
-					TTL:        oldTTL,
-					Priority:   oldPriority,
-				}
-				newRec := dnsNewRecord{
-					DomainName: newDNSRec.DomainName,
-					HostName:   newDNSRec.HostName,
-					RecordType: newDNSRec.RecordType,
-					Data:       newDNSRec.Data,
-					TTL:        newDNSRec.TTL,
-					Priority:   newDNSRec.Priority,
-				}
-
-				result, err := client.recordUpdate(ctx, oldRec, newRec)
-				if err != nil {
-					return set, fmt.Errorf("SetRecords: recordUpdate failed: %w", err)
-				}
-				if err := checkResult(result, "recordUpdate"); err != nil {
-					return set, fmt.Errorf("SetRecords: %w", err)
-				}
-			}
-		} else {
-			// No ID — just add
-			p.log("SetRecords: adding new record type=%s hostname=%q data=%q", newDNSRec.RecordType, newDNSRec.HostName, newDNSRec.Data)
-
-			result, err := client.recordAdd(ctx, newDNSRec)
-			if err != nil {
-				return set, fmt.Errorf("SetRecords: recordAdd failed: %w", err)
-			}
-			if err := checkResult(result, "recordAdd"); err != nil {
-				return set, fmt.Errorf("SetRecords: %w", err)
-			}
+		addResult, err := client.recordAdd(ctx, gidiRec)
+		if err != nil {
+			return set, fmt.Errorf("SetRecords: recordAdd failed: %w", err)
+		}
+		if err := checkResult(addResult, "recordAdd"); err != nil {
+			return set, fmt.Errorf("SetRecords: %w", err)
 		}
 
-		setRec := rec
-		setRec.ID = newDNSRec.HostName + "|" + newDNSRec.RecordType + "|" + newDNSRec.Data
-		setRec.TTL = time.Duration(newDNSRec.TTL) * time.Second
-		set = append(set, setRec)
-
-		p.log("SetRecords: successfully set record id=%q", setRec.ID)
+		set = append(set, rec)
+		p.log("SetRecords: successfully set record type=%s hostname=%q", gidiRec.RecordType, gidiRec.HostName)
 	}
 
 	return set, nil
 }
 
-// DeleteRecords deletes the given DNS records from the zone. It returns the records that were deleted.
-func (p *Provider) DeleteRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
+// DeleteRecords deletes the given DNS records from the zone.
+// It returns only the records that were actually deleted.
+// Records that do not exist on the server are silently ignored.
+func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	domain := zoneToDomain(zone)
-	p.log("DeleteRecords: zone=%q domain=%q count=%d", zone, domain, len(records))
+	p.log("DeleteRecords: zone=%q domain=%q count=%d", zone, domain, len(recs))
 
 	client := p.getClient()
+
+	// Fetch existing records to get exact TTL/Priority values needed for deletion
+	listResult, err := client.recordGetList(ctx, domain)
+	if err != nil {
+		return nil, fmt.Errorf("DeleteRecords: failed to get existing records: %w", err)
+	}
+	if err := checkResult(&apiResult{
+		ResultText:    listResult.ResultText,
+		ResultCode:    listResult.ResultCode,
+		ResultSubCode: listResult.ResultSubCode,
+	}, "recordGetList"); err != nil {
+		return nil, fmt.Errorf("DeleteRecords: %w", err)
+	}
+
 	var deleted []libdns.Record
 
-	for _, rec := range records {
-		// If we have a synthetic ID, use it to identify the record precisely
-		var dnsRec dnsRecord
-		if rec.ID != "" {
-			hostName, recordType, data, ok := parseRecordID(rec.ID)
-			if !ok {
-				return deleted, fmt.Errorf("DeleteRecords: invalid record ID %q", rec.ID)
+	for _, rec := range recs {
+		rr := rec.RR()
+		hostName := relativeToFQDN(rr.Name, domain)
+
+		// Determine the data value to match
+		var matchData string
+		switch r := rec.(type) {
+		case libdns.TXT:
+			matchData = r.Text
+		case libdns.MX:
+			matchData = r.Target
+		default:
+			matchData = rr.Data
+		}
+
+		// Find matching records on the server
+		found := false
+		for _, existing := range listResult.ResultItems {
+			if existing.ReadOnly {
+				continue
 			}
 
-			// We need the TTL and Priority from the existing record to delete it.
-			listResult, err := client.recordGetList(ctx, domain)
-			if err != nil {
-				return deleted, fmt.Errorf("DeleteRecords: failed to get existing records: %w", err)
+			// Match by hostname
+			if !strings.EqualFold(existing.HostName, hostName) {
+				continue
 			}
-			if err := checkResult(&apiResult{
-				ResultText:    listResult.ResultText,
-				ResultCode:    listResult.ResultCode,
-				ResultSubCode: listResult.ResultSubCode,
-			}, "recordGetList"); err != nil {
+
+			// Match by type (if specified)
+			if rr.Type != "" && !strings.EqualFold(existing.RecordType, rr.Type) {
+				continue
+			}
+
+			// Match by data (if specified)
+			if matchData != "" && existing.Data != matchData {
+				continue
+			}
+
+			// Match by TTL (if specified)
+			if rr.TTL > 0 && int(rr.TTL.Seconds()) != existing.TTL {
+				continue
+			}
+
+			delRec := dnsRecord{
+				DomainName: domain,
+				HostName:   existing.HostName,
+				RecordType: existing.RecordType,
+				Data:       existing.Data,
+				TTL:        uint(existing.TTL),
+				Priority:   uint(existing.Priority),
+			}
+
+			p.log("DeleteRecords: deleting type=%s hostname=%q data=%q ttl=%d", delRec.RecordType, delRec.HostName, delRec.Data, delRec.TTL)
+
+			delResult, err := client.recordDelete(ctx, delRec)
+			if err != nil {
 				return deleted, fmt.Errorf("DeleteRecords: %w", err)
 			}
 
-			found := false
-			for _, item := range listResult.ResultItems {
-				if item.HostName == hostName && item.RecordType == recordType && item.Data == data {
-					dnsRec = dnsRecord{
-						DomainName: domain,
-						HostName:   item.HostName,
-						RecordType: item.RecordType,
-						Data:       item.Data,
-						TTL:        uint(item.TTL),
-						Priority:   uint(item.Priority),
-					}
-					found = true
-					break
-				}
-			}
-
-			if !found {
-				return deleted, fmt.Errorf("DeleteRecords: record with ID %q not found on server", rec.ID)
-			}
-		} else {
-			// No ID — build the record from the libdns fields.
-			// We still need to look up TTL/Priority from the server because Gidinet
-			// requires an exact match of all fields to delete.
-			hostName := relativeToFQDN(rec.Name, domain)
-
-			listResult, err := client.recordGetList(ctx, domain)
-			if err != nil {
-				return deleted, fmt.Errorf("DeleteRecords: failed to get existing records: %w", err)
-			}
-			if err := checkResult(&apiResult{
-				ResultText:    listResult.ResultText,
-				ResultCode:    listResult.ResultCode,
-				ResultSubCode: listResult.ResultSubCode,
-			}, "recordGetList"); err != nil {
+			if err := checkResult(delResult, "recordDelete"); err != nil {
 				return deleted, fmt.Errorf("DeleteRecords: %w", err)
 			}
 
-			found := false
-			for _, item := range listResult.ResultItems {
-				if item.HostName == hostName && item.RecordType == rec.Type && item.Data == rec.Value {
-					dnsRec = dnsRecord{
-						DomainName: domain,
-						HostName:   item.HostName,
-						RecordType: item.RecordType,
-						Data:       item.Data,
-						TTL:        uint(item.TTL),
-						Priority:   uint(item.Priority),
-					}
-					found = true
-					break
-				}
-			}
-
-			if !found {
-				return deleted, fmt.Errorf("DeleteRecords: record type=%s name=%q value=%q not found on server", rec.Type, rec.Name, rec.Value)
-			}
+			deleted = append(deleted, toLibdnsRecord(existing, domain))
+			found = true
+			p.log("DeleteRecords: successfully deleted record type=%s hostname=%q", existing.RecordType, existing.HostName)
 		}
 
-		p.log("DeleteRecords: deleting type=%s hostname=%q data=%q ttl=%d", dnsRec.RecordType, dnsRec.HostName, dnsRec.Data, dnsRec.TTL)
-
-		result, err := client.recordDelete(ctx, dnsRec)
-		if err != nil {
-			return deleted, fmt.Errorf("DeleteRecords: %w", err)
+		if !found {
+			p.log("DeleteRecords: record type=%s name=%q not found on server, skipping", rr.Type, rr.Name)
 		}
-
-		if err := checkResult(result, "recordDelete"); err != nil {
-			return deleted, fmt.Errorf("DeleteRecords: %w", err)
-		}
-
-		deleted = append(deleted, rec)
-		p.log("DeleteRecords: successfully deleted record type=%s name=%q", rec.Type, rec.Name)
 	}
 
 	return deleted, nil
