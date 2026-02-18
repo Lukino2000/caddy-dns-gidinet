@@ -48,24 +48,3 @@ cp .env.example .env
 # Edit .env with your real credentials
 go run .
 ```
-
----
-## Comandi finali per compilare e testare
-
-```bash
-cd caddy-dns-gidinet
-
-# Modulo principale
-go mod tidy
-go build ./...
-
-# Modulo example
-cd example
-go mod tidy
-go build .
-
-# Per eseguire il test
-cp .env.example .env
-# Modifica .env con le tue credenziali
-go run .
-```

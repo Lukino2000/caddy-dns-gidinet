@@ -5,6 +5,7 @@ URL: https://api.quickservicebox.com/API/Beta/DNSAPI.asmx
 - recordAdd
 - recordDelete
 - recordGetList
+- recordUpdate
 
 **Importante**: l'interfacciamento alle API per il servizio DNS possibile esclusivamente tramite protocollo SOAP.
 
@@ -18,7 +19,7 @@ Ad esempio per un sottodominio "www" del dominio "dominio.ext", il campo HostNam
 
 Per questione di compatibilità, valgono le seguenti eccezioni nell'impostazione del campo HostName:
 per i record del livello del dominio stesso, l'HostName può essere indicato con "@";
-per i sottodomini, il sistema accetta HostName che non terminano con il dominio considerandoli in quel caso sottodomini del dominio stesso, ad esempio un HostName "www" del dominio "dominio.ext", sarà trattato dal sistema come "www.dominio.ext", questo vale anche per i sottodomini di 4° livello e seguenti.
+per i sottodomini, il sistema accetta HovstName che non terminano con il dominio considerandoli in quel caso sottodomini del dominio stesso, ad esempio un HostName "www" del dominio "dominio.ext", sarà trattato dal sistema come "www.dominio.ext", questo vale anche per i sottodomini di 4° livello e seguenti.
 
 Le eccezioni sopra riportate valgono esclusivamente per i parametri passati con i metodi recordAdd, recordUpdate, recordDelete.
 I valori dei singoli HostName dei record restituiti dal metodo recordGetList saranno invece sempre indirizzi completi del dominio.
