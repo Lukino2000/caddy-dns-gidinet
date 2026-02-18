@@ -28,8 +28,8 @@ func (p *Provider) Provision(ctx caddy.Context) error {
 	}
 
 	repl := caddy.NewReplacer()
-	g.Username = repl.ReplaceAll(g.Username,"")
-	g.Password = repl.ReplaceAll(g.Password,"")
+	p.Username = repl.ReplaceAll(p.Username,"")
+	p.Password = repl.ReplaceAll(p.Password,"")
 
 	p.log("Gidinet DNS provider provisioned for user %q", p.Username)
 	return nil
